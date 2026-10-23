@@ -46,3 +46,29 @@ review outcome, and `2` means an input or command error.
 This version reads structured JSON only. It does not extract PDFs, provide PDF
 page coordinates, verify authenticity, or model tax, discounts, shipping,
 currency conversion, or rounding policies. The sample documents are synthetic.
+
+
+## Three-way reconciliation
+
+Compare a purchase order, supplier invoice and goods receipt note (GRN):
+
+```bash
+python -m docweave.three_way_cli \
+  data/purchase_order.json data/invoice.json data/goods_receipt_note.json
+```
+
+The GRN records a document ID, supplier ID, item IDs and received quantities.
+DocWeave flags invoices that bill more than recorded receipt quantities,
+receipts that exceed ordered quantities, unexpected received items and supplier
+mismatches. Findings include JSON Pointer evidence and source fingerprints.
+
+Run the full tests and synthetic evaluation with:
+
+```bash
+python -m unittest discover -s tests -v
+python tools/evaluate_three_way.py
+```
+
+The synthetic evaluation tests designed scenarios only; it is not a claim of
+production accuracy. Partial deliveries may be valid, and delivery schedules,
+returns, tolerances and amended orders are not yet modeled.

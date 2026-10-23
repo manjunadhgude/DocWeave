@@ -1,0 +1,14 @@
+{
+  "document_id": "GRN-1001",
+  "supplier_id": "SUP-001",
+  "lines": [
+    {
+      "item_id": "ITEM-A",
+      "quantity": "10"
+    },
+    {
+      "item_id": "ITEM-B",
+      "quantity": "2"
+    }
+  ]
+}
