@@ -46,9 +46,11 @@ review outcome, and `2` means an input or command error.
 
 ## Current limitations
 
-This version reads structured JSON only. It does not extract PDFs, provide PDF
-page coordinates, verify authenticity, or model tax, discounts, shipping,
-currency conversion, or rounding policies. The sample documents are synthetic.
+PDF support currently covers digital PDFs with explicitly labelled fields and
+recognized pipe-separated tables. Arbitrary supplier layouts, scanned-image
+OCR, visual page coordinates, document authenticity verification, tax,
+discounts, shipping, currency conversion, and rounding policies are not yet
+modeled. The sample documents and evaluation scenarios are synthetic.
 
 
 ## Three-way reconciliation
@@ -221,3 +223,58 @@ This is an initial local-development API, not a production deployment.
 Authentication, rate limiting, persistent job storage, deployment hardening,
 and a total request-body limit at the HTTP ingress layer are not yet implemented.
 Do not expose this service publicly without appropriate security controls.
+
+## Persistent reconciliation history
+
+Batch 11 adds a database-backed history of reconciliation results. The API
+saves each successful reconciliation operation, including `MATCH`,
+`DISCREPANCY`, and `NEEDS_REVIEW` reports. Original JSON documents and original
+PDF files are not stored. PDF source metadata retains available fingerprints
+and basic provenance fields, without temporary filesystem paths.
+
+By default, the API uses a local SQLite database at `./docweave.db`. This is a
+convenient local-development fallback. To use PostgreSQL, configure the
+`DATABASE_URL` environment variable with a SQLAlchemy PostgreSQL URL using
+psycopg 3, for example:
+
+`postgresql+psycopg://docweave:YOUR_PASSWORD@127.0.0.1:5432/docweave`
+
+A local PostgreSQL service can be started with Docker Compose. Copy
+`.env.example` to `.env`, replace the example password in both environment
+values with the same URL-safe local-development password, and then run:
+
+```bash
+docker compose up -d db
+```
+
+In the terminal where you will run the API, load the environment values and
+start the service:
+
+```bash
+set -a
+source .env
+set +a
+python -m uvicorn docweave.api:app --host 127.0.0.1 --port 8000
+```
+
+The API creates missing database tables at startup for this prototype. It does
+not yet use versioned schema migrations; those are needed before making
+controlled schema changes in a production deployment.
+
+History endpoints:
+
+- `GET /api/v1/reconciliations` — list saved records, newest first.
+- `GET /api/v1/reconciliations?status=MATCH` — filter by result status.
+- `GET /api/v1/reconciliations?workflow=two_way_json` — filter by workflow.
+- `GET /api/v1/reconciliations?limit=20&offset=0` — paginate history.
+- `GET /api/v1/reconciliations/{reconciliation_id}` — retrieve a saved report.
+
+Every reconciliation POST response now includes `reconciliation_id` and
+`created_at`. The history listing returns metadata; the detail endpoint
+returns the saved report. A database write failure returns an error rather
+than claiming the result was saved.
+
+The default SQLite database is intended for local development. Automated API
+tests use a separate SQLite test database. PostgreSQL compatibility is
+implemented, but a real PostgreSQL integration run is still required before
+claiming that deployment has been validated against a live PostgreSQL server.

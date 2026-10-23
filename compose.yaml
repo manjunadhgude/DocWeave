@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: docweave
+      POSTGRES_USER: docweave
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env file}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - docweave_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docweave -d docweave"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  docweave_postgres_data:

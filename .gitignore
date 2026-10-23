@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local DocWeave databases and secrets
+docweave.db
+docweave_test.db
+*.sqlite3
+*.sqlite3-journal
+.env
