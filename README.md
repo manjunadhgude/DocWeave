@@ -194,3 +194,30 @@ This workflow inherits the conservative, labelled-field and pipe-table format
 supported by the current extractor. It does not support arbitrary supplier
 layouts or scanned-image OCR, and successful matching does not prove document
 authenticity or physical delivery.
+
+## FastAPI backend
+
+Install dependencies with `python -m pip install -r requirements.txt`, then
+start the local API server:
+
+```bash
+python -m uvicorn docweave.api:app --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:8000/docs` to explore the interactive API documentation.
+
+Endpoints:
+
+- `GET /health` — basic service health.
+- `POST /api/v1/reconcile/two-way/json` — purchase order and invoice JSON.
+- `POST /api/v1/reconcile/three-way/json` — purchase order, invoice and GRN JSON.
+- `POST /api/v1/reconcile/three-way/pdf` — three digital PDF files.
+
+Business results such as `MATCH`, `DISCREPANCY` and `NEEDS_REVIEW` are returned
+as reconciliation reports. Invalid request shapes are rejected by the API.
+The PDF endpoint applies a 25 MiB per-file limit and requires `.pdf` filenames.
+
+This is an initial local-development API, not a production deployment.
+Authentication, rate limiting, persistent job storage, deployment hardening,
+and a total request-body limit at the HTTP ingress layer are not yet implemented.
+Do not expose this service publicly without appropriate security controls.
