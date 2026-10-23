@@ -140,3 +140,30 @@ Test the PDF ingestion feature with:
 ```bash
 python -m unittest tests.test_pdf_ingest -v
 ```
+
+## Conservative PDF field extraction
+
+Extract labelled fields from a supported digital PDF layout:
+
+```bash
+python -m docweave.pdf_fields_cli path/to/invoice.pdf --role invoice
+python -m docweave.pdf_fields_cli path/to/purchase_order.pdf --role purchase_order
+python -m docweave.pdf_fields_cli path/to/grn.pdf --role goods_receipt_note
+```
+
+The first supported layout uses explicit labels such as `Invoice No: INV-1`,
+`Supplier ID: SUP-1`, `Currency: INR`, and `Grand Total: 100.00`, followed by
+a pipe-separated line-item table. The table needs recognizable columns such as
+`Item ID`, `Quantity`, and, for invoices/purchase orders, `Unit Price`.
+GRNs need an item ID and received quantity.
+
+Each extracted field and line item includes the page number and a snippet from
+the extracted PDF text. Missing or conflicting values, unrecognized tables,
+duplicate item IDs, and invalid quantities/prices produce `NEEDS_REVIEW`.
+When review is required, the normalized `document` is withheld so incomplete
+data is not accidentally sent to reconciliation.
+
+This is a controlled-layout, rule-based first step, not general PDF
+understanding. It does not yet locate visual page coordinates, handle arbitrary
+supplier templates, perform OCR, or feed PDF results automatically into the
+reconciliation CLI. A successful extraction is not proof of authenticity.
