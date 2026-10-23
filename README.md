@@ -167,3 +167,30 @@ This is a controlled-layout, rule-based first step, not general PDF
 understanding. It does not yet locate visual page coordinates, handle arbitrary
 supplier templates, perform OCR, or feed PDF results automatically into the
 reconciliation CLI. A successful extraction is not proof of authenticity.
+
+## End-to-end PDF three-way reconciliation
+
+Run extraction and three-way reconciliation from a purchase-order PDF, invoice
+PDF and goods-receipt-note (GRN) PDF:
+
+```bash
+python -m docweave.pdf_three_way_cli \
+  path/to/purchase_order.pdf \
+  path/to/invoice.pdf \
+  path/to/goods_receipt_note.pdf
+```
+
+The workflow first extracts all three documents. If any PDF is unreadable or
+has missing, ambiguous or invalid required fields, the workflow returns
+`NEEDS_REVIEW` and does not run reconciliation. If extraction succeeds, the
+existing three-way reconciliation engine is used.
+
+Findings retain their JSON Pointer evidence and include `pdf_evidence` with the
+page number and extracted text snippet when that source location is available.
+Exit code `0` means `MATCH`, `1` means a detected discrepancy, and `2` means
+the workflow requires review.
+
+This workflow inherits the conservative, labelled-field and pipe-table format
+supported by the current extractor. It does not support arbitrary supplier
+layouts or scanned-image OCR, and successful matching does not prove document
+authenticity or physical delivery.
