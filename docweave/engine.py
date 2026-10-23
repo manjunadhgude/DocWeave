@@ -1,6 +1,6 @@
 """Deterministic reconciliation of structured purchase orders and invoices."""
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 
 
 class DocumentError(ValueError):
@@ -12,7 +12,7 @@ def _decimal(value, field):
         raise DocumentError(f"{field} must be a valid decimal number")
     try:
         number = Decimal(str(value))
-    except (InvalidOperation, ValueError):
+    except (DecimalException, ValueError, TypeError):
         raise DocumentError(f"{field} must be a valid decimal number") from None
     if not number.is_finite():
         raise DocumentError(f"{field} must be finite")
@@ -33,37 +33,45 @@ def _validate(document, label):
         raise DocumentError(f"{label}.lines must be a non-empty list")
 
     validated = {}
-    for index, line in enumerate(lines):
-        prefix = f"{label}.lines[{index}]"
-        if not isinstance(line, dict):
-            raise DocumentError(f"{prefix} must be an object")
+    try:
+        for index, line in enumerate(lines):
+            prefix = f"{label}.lines[{index}]"
+            if not isinstance(line, dict):
+                raise DocumentError(f"{prefix} must be an object")
 
-        item = line.get("item_id")
-        if not isinstance(item, str) or not item.strip():
-            raise DocumentError(f"{prefix}.item_id is required")
-        if item in validated:
-            raise DocumentError(f"{label} contains duplicate item_id {item!r}")
+            item = line.get("item_id")
+            if not isinstance(item, str) or not item.strip():
+                raise DocumentError(f"{prefix}.item_id is required")
+            if item in validated:
+                raise DocumentError(
+                    f"{label} contains duplicate item_id {item!r}"
+                )
 
-        quantity = _decimal(line.get("quantity"), f"{prefix}.quantity")
-        price = _decimal(line.get("unit_price"), f"{prefix}.unit_price")
-        if quantity <= 0:
-            raise DocumentError(f"{prefix}.quantity must be positive")
-        if price < 0:
-            raise DocumentError(f"{prefix}.unit_price cannot be negative")
+            quantity = _decimal(line.get("quantity"), f"{prefix}.quantity")
+            price = _decimal(line.get("unit_price"), f"{prefix}.unit_price")
+            if quantity <= 0:
+                raise DocumentError(f"{prefix}.quantity must be positive")
+            if price < 0:
+                raise DocumentError(f"{prefix}.unit_price cannot be negative")
 
-        validated[item] = {
-            "quantity": quantity,
-            "unit_price": price,
-            "line_total": quantity * price,
-        }
+            validated[item] = {
+                "quantity": quantity,
+                "unit_price": price,
+                "line_total": quantity * price,
+            }
 
-    declared_total = _decimal(document.get("total"), f"{label}.total")
-    if declared_total < 0:
-        raise DocumentError(f"{label}.total cannot be negative")
+        declared_total = _decimal(document.get("total"), f"{label}.total")
+        if declared_total < 0:
+            raise DocumentError(f"{label}.total cannot be negative")
 
-    calculated_total = sum(
-        (line["line_total"] for line in validated.values()), Decimal("0")
-    )
+        calculated_total = sum(
+            (line["line_total"] for line in validated.values()), Decimal("0")
+        )
+    except DecimalException:
+        raise DocumentError(
+            f"{label} contains values outside supported decimal arithmetic limits"
+        ) from None
+
     if declared_total != calculated_total:
         raise DocumentError(
             f"{label}.total is {declared_total}, but its lines sum to "
@@ -84,7 +92,7 @@ def _money(value):
 
 
 def reconcile(purchase_order, invoice):
-    """Compare two documents and return an auditable JSON-ready report."""
+    """Return a JSON-ready reconciliation report."""
     base = {
         "purchase_order_id": (
             purchase_order.get("document_id")
@@ -101,10 +109,7 @@ def reconcile(purchase_order, invoice):
         po = _validate(purchase_order, "purchase_order")
         inv = _validate(invoice, "invoice")
     except DocumentError as error:
-        base.update({
-            "status": "NEEDS_REVIEW",
-            "reason": str(error),
-        })
+        base.update({"status": "NEEDS_REVIEW", "reason": str(error)})
         return base
 
     findings = base["findings"]
@@ -125,11 +130,13 @@ def reconcile(purchase_order, invoice):
             "The supplier identifiers differ."
         )
 
-    if po["currency"] != inv["currency"]:
+    same_currency = po["currency"] == inv["currency"]
+    if not same_currency:
         finding(
             "CURRENCY_MISMATCH", "currency",
             po["currency"], inv["currency"],
-            "The document currencies differ; totals cannot be compared directly."
+            "The document currencies differ; monetary values cannot be "
+            "compared directly without an explicit conversion policy."
         )
 
     po_items = set(po["lines"])
@@ -158,14 +165,15 @@ def reconcile(purchase_order, invoice):
                 "The invoiced quantity differs from the ordered quantity."
             )
 
-        if expected["unit_price"] != actual["unit_price"]:
+        # Prices are comparable only when both documents use the same currency.
+        if same_currency and expected["unit_price"] != actual["unit_price"]:
             finding(
                 "UNIT_PRICE_MISMATCH", f"lines.{item}.unit_price",
                 _money(expected["unit_price"]), _money(actual["unit_price"]),
                 "The invoiced unit price differs from the agreed unit price."
             )
 
-    if po["currency"] == inv["currency"] and po["total"] != inv["total"]:
+    if same_currency and po["total"] != inv["total"]:
         finding(
             "TOTAL_MISMATCH", "total",
             _money(po["total"]), _money(inv["total"]),
@@ -178,12 +186,13 @@ def reconcile(purchase_order, invoice):
         "summary": {
             "purchase_order_total": _money(po["total"]),
             "invoice_total": _money(inv["total"]),
-            "currency": po["currency"],
+            "currency": po["currency"] if same_currency else None,
         },
         "limitations": [
-            "Only structured data is checked; no source-document evidence "
-            "or authenticity verification is performed yet.",
-            "Tax, discounts, shipping, and rounding policies are not modeled.",
+            "Only structured data is checked; source-document evidence and "
+            "authenticity are not verified.",
+            "Tax, discounts, shipping, currency conversion and rounding "
+            "policies are not modeled.",
         ],
     })
     return base
