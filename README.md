@@ -18,7 +18,10 @@ file or that the business document is authentic.
 ## Requirements
 
 - Python 3.10 or later
-- Python standard library only
+- Python standard library
+- `pypdf` for digital PDF text extraction
+
+Install dependencies with `python -m pip install -r requirements.txt`.
 
 ## Run the tests
 
@@ -105,4 +108,35 @@ Run all tests, including policy-hardening cases, with:
 
 ```bash
 python -m unittest discover -s tests -v
+```
+
+## Digital PDF text extraction
+
+Install the PDF dependency:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Extract text from a digital PDF, preserving page numbers and a fingerprint
+of the source file:
+
+```bash
+python -m docweave.pdf_cli path/to/invoice.pdf --role invoice
+```
+
+Supported roles are `purchase_order`, `invoice`, and `goods_receipt_note`.
+The command returns JSON containing each page's extracted text, page number,
+character count, and source metadata including SHA-256.
+
+The current extractor has a 25 MiB file-size limit and a 200-page limit.
+Encrypted, invalid, or textless PDFs are sent to review with a structured
+error. A textless PDF may be scanned and require OCR. PDF text extraction
+does not yet identify business fields or feed the reconciliation engine.
+Extracted text order and completeness depend on the PDF's internal structure.
+
+Test the PDF ingestion feature with:
+
+```bash
+python -m unittest tests.test_pdf_ingest -v
 ```
