@@ -72,3 +72,37 @@ python tools/evaluate_three_way.py
 The synthetic evaluation tests designed scenarios only; it is not a claim of
 production accuracy. Partial deliveries may be valid, and delivery schedules,
 returns, tolerances and amended orders are not yet modeled.
+
+## Reconciliation policy boundaries
+
+- `MATCH` means the structured fields checked by the current rules agree; it
+  does not prove that a document is genuine or that goods physically arrived.
+- `DISCREPANCY` means one or more configured checks found a difference.
+  Business users should review the evidence before deciding what action to take.
+- `NEEDS_REVIEW` is used when input data is invalid or cannot be safely checked.
+- Currency differences are reported, but monetary amounts are not directly
+  compared across different currencies.
+- In three-way matching, an invoice quantity greater than the recorded receipt
+  is flagged. A receipt quantity greater than the order is separately flagged.
+- A partial delivery can be legitimate. However, the current policy still flags
+  invoice-versus-order quantity or total differences, even if the invoice matches
+  the quantity received. Such cases need review; partial-invoice approval rules
+  have not yet been implemented.
+- A missing item in the receipt is treated as zero recorded quantity for the
+  overbilling check. The evidence points to the receipt's `lines` collection to
+  show that no matching line was found.
+- Synthetic evaluation cases are designed checks, not real-world accuracy
+  measurements. Real supplier documents and expert-reviewed expected outcomes
+  are needed before making claims about production performance.
+
+Run the expanded evaluation with:
+
+```bash
+python tools/evaluate_three_way.py
+```
+
+Run all tests, including policy-hardening cases, with:
+
+```bash
+python -m unittest discover -s tests -v
+```
