@@ -3,7 +3,6 @@
 import hashlib
 import json
 import tempfile
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +20,6 @@ from docweave.storage import (
     extract_document_ids,
     extract_source_metadata,
     get_db,
-    init_db,
     record_detail,
     record_summary,
     timestamp_iso,
@@ -32,21 +30,13 @@ from docweave.three_way import reconcile_three_way
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    # Creates missing tables. Use migrations for future schema changes.
-    init_db()
-    yield
-
-
 app = FastAPI(
     title="DocWeave API",
     description=(
         "Evidence-grounded purchase-order, invoice and goods-receipt "
         "reconciliation with persistent result history."
     ),
-    version="1.1.0",
-    lifespan=lifespan,
+    version="1.2.0",
 )
 
 

@@ -257,9 +257,34 @@ set +a
 python -m uvicorn docweave.api:app --host 127.0.0.1 --port 8000
 ```
 
-The API creates missing database tables at startup for this prototype. It does
-not yet use versioned schema migrations; those are needed before making
-controlled schema changes in a production deployment.
+Database schema changes are managed with Alembic migrations. The API does
+not create or upgrade tables automatically at startup.
+
+For a new database, apply the checked-in migrations before starting the API:
+
+```bash
+python -m alembic upgrade head
+```
+
+For an existing database created by an earlier DocWeave version, back it up
+first, set `DATABASE_URL` to that exact database, and run the read-only schema
+verification command:
+
+```bash
+python tools/verify_database_schema.py
+```
+
+Only if verification succeeds should you mark the existing schema as the
+initial migration version:
+
+```bash
+python -m alembic stamp head
+```
+
+Stamping records the migration version without creating, dropping or altering
+application tables. Do not stamp a database whose schema has not been verified.
+Future schema changes should be added as new migrations. Review and test
+migrations against backups before production use.
 
 History endpoints:
 

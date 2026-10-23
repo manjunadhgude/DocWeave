@@ -14,7 +14,7 @@ os.environ["DATABASE_URL"] = "sqlite:///./docweave_test.db"
 from fastapi.testclient import TestClient
 
 from docweave.api import app
-from docweave.storage import IdempotencyRecord, ReconciliationRecord, SessionLocal
+from docweave.storage import Base, IdempotencyRecord, ReconciliationRecord, SessionLocal, engine
 from test_pdf_ingest import make_text_pdf
 
 
@@ -74,6 +74,8 @@ def grn_lines(quantity=2):
 
 class DocWeaveAPITests(unittest.TestCase):
     def setUp(self):
+        # Test-only schema setup. Production schema changes use Alembic.
+        Base.metadata.create_all(bind=engine)
         self.client = TestClient(app)
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)

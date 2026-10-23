@@ -90,14 +90,6 @@ class IdempotencyRecord(Base):
     )
 
 
-def init_db() -> None:
-    """Create missing tables for this prototype.
-
-    Production deployments should use versioned database migrations instead.
-    """
-    Base.metadata.create_all(bind=engine)
-
-
 def get_db() -> Generator[Session, None, None]:
     """Provide one database session per API request."""
     session = SessionLocal()
