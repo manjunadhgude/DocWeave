@@ -1,10 +1,10 @@
-"""Deterministic reconciliation of structured purchase orders and invoices."""
+"""Deterministic reconciliation with traceable JSON evidence."""
 
-from decimal import Decimal, DecimalException, InvalidOperation
+from decimal import Decimal, DecimalException
 
 
 class DocumentError(ValueError):
-    """Raised when a document cannot be validated."""
+    """Raised when a structured business document is invalid."""
 
 
 def _decimal(value, field):
@@ -55,6 +55,7 @@ def _validate(document, label):
                 raise DocumentError(f"{prefix}.unit_price cannot be negative")
 
             validated[item] = {
+                "index": index,
                 "quantity": quantity,
                 "unit_price": price,
                 "line_total": quantity * price,
@@ -91,8 +92,19 @@ def _money(value):
     return format(value, "f")
 
 
+def _evidence(role, document, pointer, value):
+    if isinstance(value, Decimal):
+        value = _money(value)
+    return {
+        "document_role": role,
+        "document_id": document["document_id"],
+        "json_pointer": pointer,
+        "value": value,
+    }
+
+
 def reconcile(purchase_order, invoice):
-    """Return a JSON-ready reconciliation report."""
+    """Compare structured documents and return JSON-ready evidence."""
     base = {
         "purchase_order_id": (
             purchase_order.get("document_id")
@@ -103,6 +115,7 @@ def reconcile(purchase_order, invoice):
             if isinstance(invoice, dict) else None
         ),
         "findings": [],
+        "evidence_format": "JSON Pointer (RFC 6901)",
     }
 
     try:
@@ -114,20 +127,29 @@ def reconcile(purchase_order, invoice):
 
     findings = base["findings"]
 
-    def finding(code, field, expected, actual, explanation):
+    def finding(
+        code, field, expected, actual, explanation,
+        expected_evidence=None, actual_evidence=None,
+    ):
         findings.append({
             "code": code,
             "field": field,
             "expected": expected,
             "actual": actual,
             "explanation": explanation,
+            "evidence": {
+                "expected": expected_evidence,
+                "actual": actual_evidence,
+            },
         })
 
     if po["supplier_id"] != inv["supplier_id"]:
         finding(
             "SUPPLIER_MISMATCH", "supplier_id",
             po["supplier_id"], inv["supplier_id"],
-            "The supplier identifiers differ."
+            "The supplier identifiers differ.",
+            _evidence("purchase_order", po, "/supplier_id", po["supplier_id"]),
+            _evidence("invoice", inv, "/supplier_id", inv["supplier_id"]),
         )
 
     same_currency = po["currency"] == inv["currency"]
@@ -135,49 +157,84 @@ def reconcile(purchase_order, invoice):
         finding(
             "CURRENCY_MISMATCH", "currency",
             po["currency"], inv["currency"],
-            "The document currencies differ; monetary values cannot be "
-            "compared directly without an explicit conversion policy."
+            "The currencies differ; monetary values cannot be compared "
+            "directly without an explicit conversion policy.",
+            _evidence("purchase_order", po, "/currency", po["currency"]),
+            _evidence("invoice", inv, "/currency", inv["currency"]),
         )
 
     po_items = set(po["lines"])
     inv_items = set(inv["lines"])
 
     for item in sorted(po_items - inv_items):
+        expected = po["lines"][item]
         finding(
             "ITEM_MISSING_FROM_INVOICE", f"lines.{item}",
-            item, None, "The purchase-order item is absent from the invoice."
+            item, None,
+            "The purchase-order item is absent from the invoice.",
+            _evidence(
+                "purchase_order", po,
+                f"/lines/{expected['index']}/item_id", item,
+            ),
+            None,
         )
 
     for item in sorted(inv_items - po_items):
+        actual = inv["lines"][item]
         finding(
             "UNEXPECTED_INVOICE_ITEM", f"lines.{item}",
-            None, item, "The invoice contains an item absent from the purchase order."
+            None, item,
+            "The invoice contains an item absent from the purchase order.",
+            None,
+            _evidence(
+                "invoice", inv,
+                f"/lines/{actual['index']}/item_id", item,
+            ),
         )
 
     for item in sorted(po_items & inv_items):
         expected = po["lines"][item]
         actual = inv["lines"][item]
+        po_index = expected["index"]
+        inv_index = actual["index"]
 
         if expected["quantity"] != actual["quantity"]:
             finding(
                 "QUANTITY_MISMATCH", f"lines.{item}.quantity",
                 _money(expected["quantity"]), _money(actual["quantity"]),
-                "The invoiced quantity differs from the ordered quantity."
+                "The invoiced quantity differs from the ordered quantity.",
+                _evidence(
+                    "purchase_order", po,
+                    f"/lines/{po_index}/quantity", expected["quantity"],
+                ),
+                _evidence(
+                    "invoice", inv,
+                    f"/lines/{inv_index}/quantity", actual["quantity"],
+                ),
             )
 
-        # Prices are comparable only when both documents use the same currency.
         if same_currency and expected["unit_price"] != actual["unit_price"]:
             finding(
                 "UNIT_PRICE_MISMATCH", f"lines.{item}.unit_price",
                 _money(expected["unit_price"]), _money(actual["unit_price"]),
-                "The invoiced unit price differs from the agreed unit price."
+                "The invoiced unit price differs from the agreed unit price.",
+                _evidence(
+                    "purchase_order", po,
+                    f"/lines/{po_index}/unit_price", expected["unit_price"],
+                ),
+                _evidence(
+                    "invoice", inv,
+                    f"/lines/{inv_index}/unit_price", actual["unit_price"],
+                ),
             )
 
     if same_currency and po["total"] != inv["total"]:
         finding(
             "TOTAL_MISMATCH", "total",
             _money(po["total"]), _money(inv["total"]),
-            "The declared document totals differ."
+            "The declared document totals differ.",
+            _evidence("purchase_order", po, "/total", po["total"]),
+            _evidence("invoice", inv, "/total", inv["total"]),
         )
 
     base.update({
@@ -189,8 +246,8 @@ def reconcile(purchase_order, invoice):
             "currency": po["currency"] if same_currency else None,
         },
         "limitations": [
-            "Only structured data is checked; source-document evidence and "
-            "authenticity are not verified.",
+            "Only structured data is checked; authenticity is not verified.",
+            "JSON Pointers refer to input JSON locations, not PDF page coordinates.",
             "Tax, discounts, shipping, currency conversion and rounding "
             "policies are not modeled.",
         ],
