@@ -278,3 +278,22 @@ The default SQLite database is intended for local development. Automated API
 tests use a separate SQLite test database. PostgreSQL compatibility is
 implemented, but a real PostgreSQL integration run is still required before
 claiming that deployment has been validated against a live PostgreSQL server.
+
+
+## Idempotent API retries
+
+Reconciliation POST endpoints optionally accept an `Idempotency-Key` header.
+Use the same key when retrying the same logical submission after a timeout or
+uncertain network response. A matching retry returns the original saved response
+and does not create another history record.
+
+Keys are scoped to the workflow. Reusing a key in the same workflow with
+different input returns HTTP `409 Conflict`; use a new key for a new submission.
+Keys must be 1–128 characters and contain only letters, digits, periods,
+underscores, colons or hyphens.
+
+The API stores the key, request fingerprint and original response in a separate
+database table. The database uniqueness constraint and transaction protect
+against concurrent duplicate submissions. Requests without the header retain
+the previous behavior. This feature does not replace authentication, rate
+limiting, request-size controls at the HTTP ingress, or production migrations.

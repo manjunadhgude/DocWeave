@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Generator
 
-from sqlalchemy import JSON, DateTime, String, create_engine
+from sqlalchemy import JSON, DateTime, String, UniqueConstraint, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -58,6 +58,35 @@ class ReconciliationRecord(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
         index=True,
+    )
+
+
+
+class IdempotencyRecord(Base):
+    """Persist the result associated with one client submission key."""
+
+    __tablename__ = "idempotency_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow",
+            "idempotency_key",
+            name="uq_idempotency_workflow_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(32),
+        primary_key=True,
+        default=lambda: uuid.uuid4().hex,
+    )
+    workflow: Mapped[str] = mapped_column(String(40), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    response: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
     )
 
 

@@ -1,19 +1,22 @@
 """FastAPI interface for DocWeave reconciliation and persistent history."""
 
+import hashlib
+import json
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from docweave.engine import reconcile
 from docweave.pdf_three_way import reconcile_pdf_documents
 from docweave.storage import (
+    IdempotencyRecord,
     ReconciliationRecord,
     extract_document_ids,
     extract_source_metadata,
@@ -60,12 +63,80 @@ class ThreeWayRequest(BaseModel):
     goods_receipt_note: dict[str, Any]
 
 
+def _request_fingerprint(payload: Any) -> str:
+    """Hash a stable JSON representation of a submitted request."""
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _fingerprint_files(paths: dict[str, Path]) -> str:
+    """Fingerprint the bytes of each named PDF input."""
+    file_hashes = {
+        role: hashlib.sha256(path.read_bytes()).hexdigest()
+        for role, path in sorted(paths.items())
+    }
+    return _request_fingerprint(file_hashes)
+
+
+def _find_replay(
+    db: Session,
+    workflow: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+) -> dict | None:
+    """Return a previous response or reject reuse of a key for new input."""
+    try:
+        saved = db.scalar(
+            select(IdempotencyRecord).where(
+                IdempotencyRecord.workflow == workflow,
+                IdempotencyRecord.idempotency_key == idempotency_key,
+            )
+        )
+    except SQLAlchemyError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Idempotency history is temporarily unavailable.",
+        ) from error
+
+    if saved is None:
+        return None
+
+    if saved.request_fingerprint != request_fingerprint:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This Idempotency-Key was already used for a different "
+                "request in this workflow. Use a new key for a new submission."
+            ),
+        )
+
+    # Return the original response, including its original record ID.
+    return dict(saved.response)
+
+
 def _save_report(
     db: Session,
     report: dict,
     workflow: str,
+    idempotency_key: str | None = None,
+    request_fingerprint: str | None = None,
 ) -> dict:
-    """Persist the report before returning a successful API response."""
+    """Persist a report and, when requested, its replayable response."""
+    if idempotency_key is not None:
+        if request_fingerprint is None:
+            raise ValueError("A request fingerprint is required with an idempotency key.")
+
+        previous = _find_replay(
+            db, workflow, idempotency_key, request_fingerprint
+        )
+        if previous is not None:
+            return previous
+
     record = ReconciliationRecord(
         workflow=workflow,
         status=str(report.get("status", "UNKNOWN")),
@@ -76,8 +147,46 @@ def _save_report(
 
     try:
         db.add(record)
+        # Flush assigns the record ID and creation timestamp before the
+        # exact response is stored alongside the idempotency key.
+        db.flush()
+
+        response = dict(report)
+        response["reconciliation_id"] = record.id
+        response["created_at"] = timestamp_iso(record.created_at)
+
+        if idempotency_key is not None:
+            db.add(
+                IdempotencyRecord(
+                    workflow=workflow,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    response=response,
+                )
+            )
+
+        # The history row and replay row commit together.
         db.commit()
-        db.refresh(record)
+
+    except IntegrityError as error:
+        db.rollback()
+
+        # Another concurrent request may have committed the same key first.
+        if idempotency_key is not None and request_fingerprint is not None:
+            previous = _find_replay(
+                db, workflow, idempotency_key, request_fingerprint
+            )
+            if previous is not None:
+                return previous
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The reconciliation result could not be saved safely. "
+                "Check database availability before retrying."
+            ),
+        ) from error
+
     except SQLAlchemyError as error:
         db.rollback()
         raise HTTPException(
@@ -88,10 +197,6 @@ def _save_report(
             ),
         ) from error
 
-    # Keep the existing response shape and add persistent record identifiers.
-    response = dict(report)
-    response["reconciliation_id"] = record.id
-    response["created_at"] = timestamp_iso(record.created_at)
     return response
 
 
@@ -104,16 +209,39 @@ def health():
 @app.post("/api/v1/reconcile/two-way/json")
 def reconcile_two_way_json(
     request: TwoWayRequest,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    ),
     db: Session = Depends(get_db),
 ):
     """Reconcile JSON documents and save the resulting report."""
     report = reconcile(request.purchase_order, request.invoice)
-    return _save_report(db, report, "two_way_json")
+    return _save_report(
+        db,
+        report,
+        "two_way_json",
+        idempotency_key=idempotency_key,
+        request_fingerprint=(
+            _request_fingerprint(request.model_dump(mode="json"))
+            if idempotency_key is not None else None
+        ),
+    )
 
 
 @app.post("/api/v1/reconcile/three-way/json")
 def reconcile_three_way_json(
     request: ThreeWayRequest,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    ),
     db: Session = Depends(get_db),
 ):
     """Reconcile JSON PO, invoice and receipt, then save the report."""
@@ -122,7 +250,16 @@ def reconcile_three_way_json(
         request.invoice,
         request.goods_receipt_note,
     )
-    return _save_report(db, report, "three_way_json")
+    return _save_report(
+        db,
+        report,
+        "three_way_json",
+        idempotency_key=idempotency_key,
+        request_fingerprint=(
+            _request_fingerprint(request.model_dump(mode="json"))
+            if idempotency_key is not None else None
+        ),
+    )
 
 
 @app.get("/api/v1/reconciliations")
@@ -232,6 +369,13 @@ async def reconcile_three_way_pdf(
     purchase_order: UploadFile = File(...),
     invoice: UploadFile = File(...),
     goods_receipt_note: UploadFile = File(...),
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    ),
     db: Session = Depends(get_db),
 ):
     """Extract, reconcile and persist the report from three digital PDFs."""
@@ -255,4 +399,13 @@ async def reconcile_three_way_pdf(
             saved["invoice"],
             saved["goods_receipt_note"],
         )
-        return _save_report(db, report, "three_way_pdf")
+        return _save_report(
+            db,
+            report,
+            "three_way_pdf",
+            idempotency_key=idempotency_key,
+            request_fingerprint=(
+                _fingerprint_files(saved)
+                if idempotency_key is not None else None
+            ),
+        )

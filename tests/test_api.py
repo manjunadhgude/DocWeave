@@ -2,6 +2,9 @@ import io
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.orm import Session
 from pathlib import Path
 
 # Keep automated API tests isolated from any real PostgreSQL database.
@@ -11,7 +14,7 @@ os.environ["DATABASE_URL"] = "sqlite:///./docweave_test.db"
 from fastapi.testclient import TestClient
 
 from docweave.api import app
-from docweave.storage import ReconciliationRecord, SessionLocal
+from docweave.storage import IdempotencyRecord, ReconciliationRecord, SessionLocal
 from test_pdf_ingest import make_text_pdf
 
 
@@ -77,16 +80,18 @@ class DocWeaveAPITests(unittest.TestCase):
 
         # Each test begins with empty history, without dropping the schema.
         with SessionLocal() as db:
+            db.query(IdempotencyRecord).delete()
             db.query(ReconciliationRecord).delete()
             db.commit()
 
-    def post_two_way(self, invoice=None):
+    def post_two_way(self, invoice=None, headers=None):
         return self.client.post(
             "/api/v1/reconcile/two-way/json",
             json={
                 "purchase_order": make_document("PO-1"),
                 "invoice": invoice or make_document("INV-1"),
             },
+            headers=headers,
         )
 
     def test_health(self):
@@ -304,6 +309,159 @@ class DocWeaveAPITests(unittest.TestCase):
             "/api/v1/reconcile/three-way/pdf", files=files
         )
         self.assertEqual(response.status_code, 400)
+
+
+    def test_idempotency_retry_returns_original_response_without_duplicate(self):
+        headers = {"Idempotency-Key": "retry-test-001"}
+
+        first = self.post_two_way(headers=headers)
+        second = self.post_two_way(headers=headers)
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(first.json(), second.json())
+
+        with SessionLocal() as db:
+            self.assertEqual(db.query(ReconciliationRecord).count(), 1)
+            self.assertEqual(db.query(IdempotencyRecord).count(), 1)
+
+    def test_reusing_key_for_different_json_returns_conflict(self):
+        headers = {"Idempotency-Key": "retry-conflict-001"}
+
+        first = self.post_two_way(headers=headers)
+        second = self.post_two_way(
+            invoice=make_document("INV-1", quantity=1),
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 409, second.text)
+
+        with SessionLocal() as db:
+            self.assertEqual(db.query(ReconciliationRecord).count(), 1)
+            self.assertEqual(db.query(IdempotencyRecord).count(), 1)
+
+    def test_same_key_is_scoped_to_workflow(self):
+        headers = {"Idempotency-Key": "workflow-scope-001"}
+
+        two_way = self.post_two_way(headers=headers)
+        three_way = self.client.post(
+            "/api/v1/reconcile/three-way/json",
+            headers=headers,
+            json={
+                "purchase_order": make_document("PO-1"),
+                "invoice": make_document("INV-1"),
+                "goods_receipt_note": {
+                    "document_id": "GRN-1",
+                    "supplier_id": "SUP-1",
+                    "lines": [{"item_id": "A", "quantity": 2}],
+                },
+            },
+        )
+
+        self.assertEqual(two_way.status_code, 200, two_way.text)
+        self.assertEqual(three_way.status_code, 200, three_way.text)
+
+        with SessionLocal() as db:
+            self.assertEqual(db.query(ReconciliationRecord).count(), 2)
+            self.assertEqual(db.query(IdempotencyRecord).count(), 2)
+
+    def test_invalid_idempotency_key_is_rejected(self):
+        response = self.post_two_way(
+            headers={"Idempotency-Key": "not a valid key"}
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_idempotent_save_failure_rolls_back_both_records(self):
+        headers = {"Idempotency-Key": "save-failure-test-001"}
+
+        with patch.object(
+            Session,
+            "commit",
+            side_effect=SQLAlchemyError("simulated commit failure"),
+        ):
+            response = self.post_two_way(headers=headers)
+
+        self.assertEqual(response.status_code, 503, response.text)
+
+        # The history row and idempotency row must not be partially saved.
+        with SessionLocal() as db:
+            self.assertEqual(db.query(ReconciliationRecord).count(), 0)
+            self.assertEqual(db.query(IdempotencyRecord).count(), 0)
+
+    def test_idempotency_unique_conflict_returns_winning_response(self):
+        headers = {"Idempotency-Key": "simulated-race-test-001"}
+        winning_response = {
+            "status": "MATCH",
+            "reconciliation_id": "winning-record-id",
+            "created_at": "2026-01-01T00:00:00",
+        }
+
+        # Simulate this request finding no prior key, then losing the
+        # database uniqueness race to another request that saved first.
+        conflict = IntegrityError(
+            "INSERT",
+            {},
+            Exception("simulated unique-key conflict"),
+        )
+
+        with (
+            patch(
+                "docweave.api._find_replay",
+                side_effect=[None, winning_response],
+            ),
+            patch.object(Session, "commit", side_effect=conflict),
+        ):
+            response = self.post_two_way(headers=headers)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), winning_response)
+
+        # Our losing transaction must have rolled back its own history row.
+        with SessionLocal() as db:
+            self.assertEqual(db.query(ReconciliationRecord).count(), 0)
+            self.assertEqual(db.query(IdempotencyRecord).count(), 0)
+
+    def test_pdf_idempotency_retry_returns_original_response(self):
+        headers = {"Idempotency-Key": "pdf-retry-test-001"}
+
+        def make_uploads():
+            return {
+                "purchase_order": (
+                    "po.pdf",
+                    io.BytesIO(make_pdf_bytes(po_lines())),
+                    "application/pdf",
+                ),
+                "invoice": (
+                    "invoice.pdf",
+                    io.BytesIO(make_pdf_bytes(invoice_lines())),
+                    "application/pdf",
+                ),
+                "goods_receipt_note": (
+                    "grn.pdf",
+                    io.BytesIO(make_pdf_bytes(grn_lines())),
+                    "application/pdf",
+                ),
+            }
+
+        first = self.client.post(
+            "/api/v1/reconcile/three-way/pdf",
+            files=make_uploads(),
+            headers=headers,
+        )
+        second = self.client.post(
+            "/api/v1/reconcile/three-way/pdf",
+            files=make_uploads(),
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(first.json(), second.json())
+
+        with SessionLocal() as db:
+            self.assertEqual(db.query(ReconciliationRecord).count(), 1)
+            self.assertEqual(db.query(IdempotencyRecord).count(), 1)
 
 
 if __name__ == "__main__":
