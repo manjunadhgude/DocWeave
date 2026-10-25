@@ -69,9 +69,14 @@ def main() -> int:
             index.name: tuple(column.name for column in index.columns)
             for index in model_table.indexes
         }
+        actual_unique_constraints = inspector.get_unique_constraints(table_name)
+        unique_constraint_names = {
+            constraint.get("name") for constraint in actual_unique_constraints
+        }
         actual_indexes = {
             index["name"]: tuple(index["column_names"])
             for index in inspector.get_indexes(table_name)
+            if index["name"] not in unique_constraint_names
         }
         if expected_indexes != actual_indexes:
             problems.append(
@@ -92,7 +97,7 @@ def main() -> int:
                 constraint.get("name"),
                 tuple(sorted(constraint.get("column_names") or [])),
             )
-            for constraint in inspector.get_unique_constraints(table_name)
+            for constraint in actual_unique_constraints
         }
         if expected_unique != actual_unique:
             problems.append(

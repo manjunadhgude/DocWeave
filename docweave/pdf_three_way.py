@@ -25,7 +25,9 @@ def _evidence_index(extraction):
     return result
 
 
-def reconcile_pdf_documents(purchase_order_pdf, invoice_pdf, goods_receipt_note_pdf):
+def reconcile_pdf_documents(
+    purchase_order_pdf, invoice_pdf, goods_receipt_note_pdf, enable_ocr=False
+):
     """Extract three PDFs and reconcile only when all required fields are safe.
 
     Returns a JSON-ready report. Extraction failures stop the workflow before
@@ -42,7 +44,7 @@ def reconcile_pdf_documents(purchase_order_pdf, invoice_pdf, goods_receipt_note_
     # Try each input so a reviewer can see all extraction problems at once.
     for role, path in paths.items():
         try:
-            extracted[role] = extract_pdf_fields(path, role)
+            extracted[role] = extract_pdf_fields(path, role, enable_ocr=enable_ocr)
         except PDFLoadError as error:
             errors[role] = error.to_dict()
         except (OSError, ValueError) as error:

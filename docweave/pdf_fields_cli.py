@@ -17,10 +17,17 @@ def main(argv=None):
     )
     parser.add_argument("pdf_path", help="Path to the input PDF")
     parser.add_argument("--role", choices=ROLES, required=True)
+    parser.add_argument(
+        "--ocr",
+        action="store_true",
+        help="Enable optional OCR for PDFs with no selectable text",
+    )
     args = parser.parse_args(argv)
 
     try:
-        report = extract_pdf_fields(args.pdf_path, args.role)
+        report = extract_pdf_fields(
+            args.pdf_path, args.role, enable_ocr=args.ocr
+        )
     except PDFLoadError as error:
         print(json.dumps({
             "status": "NEEDS_REVIEW",

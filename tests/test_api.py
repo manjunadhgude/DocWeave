@@ -10,6 +10,9 @@ from pathlib import Path
 # Keep automated API tests isolated from any real PostgreSQL database.
 # This environment setting applies only to the test process.
 os.environ["DATABASE_URL"] = "sqlite:///./docweave_test.db"
+os.environ["DOCWEAVE_API_TOKEN"] = "docweave-test-token"
+os.environ["DOCWEAVE_RATE_LIMIT_REQUESTS"] = "10000"
+os.environ["DOCWEAVE_RATE_LIMIT_WINDOW_SECONDS"] = "60"
 
 from fastapi.testclient import TestClient
 
@@ -76,7 +79,9 @@ class DocWeaveAPITests(unittest.TestCase):
     def setUp(self):
         # Test-only schema setup. Production schema changes use Alembic.
         Base.metadata.create_all(bind=engine)
-        self.client = TestClient(app)
+        self.client = TestClient(
+            app, headers={"Authorization": f"Bearer {os.environ['DOCWEAVE_API_TOKEN']}"}
+        )
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
 
@@ -464,6 +469,167 @@ class DocWeaveAPITests(unittest.TestCase):
         with SessionLocal() as db:
             self.assertEqual(db.query(ReconciliationRecord).count(), 1)
             self.assertEqual(db.query(IdempotencyRecord).count(), 1)
+
+
+    def test_pdf_idempotency_includes_ocr_processing_option(self):
+        headers = {"Idempotency-Key": "pdf-ocr-option-001"}
+        report = {
+            "status": "NEEDS_REVIEW",
+            "workflow": "pdf_three_way",
+            "findings": [],
+            "limitations": [],
+            "documents": {},
+            "review_reasons": {},
+            "extraction_errors": {},
+        }
+
+        def make_uploads():
+            return {
+                "purchase_order": (
+                    "po.pdf", io.BytesIO(make_pdf_bytes(po_lines())), "application/pdf"
+                ),
+                "invoice": (
+                    "invoice.pdf", io.BytesIO(make_pdf_bytes(invoice_lines())), "application/pdf"
+                ),
+                "goods_receipt_note": (
+                    "grn.pdf", io.BytesIO(make_pdf_bytes(grn_lines())), "application/pdf"
+                ),
+            }
+
+        with patch("docweave.api.reconcile_pdf_documents", return_value=report):
+            first = self.client.post(
+                "/api/v1/reconcile/three-way/pdf",
+                files=make_uploads(),
+                headers=headers,
+            )
+            replay_with_different_option = self.client.post(
+                "/api/v1/reconcile/three-way/pdf",
+                params={"enable_ocr": "true"},
+                files=make_uploads(),
+                headers=headers,
+            )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(replay_with_different_option.status_code, 409)
+        self.assertIn("different request", replay_with_different_option.json()["detail"])
+        with SessionLocal() as db:
+            self.assertEqual(db.query(ReconciliationRecord).count(), 1)
+            self.assertEqual(db.query(IdempotencyRecord).count(), 1)
+
+    def test_pdf_api_ocr_is_opt_in(self):
+        report = {
+            "status": "NEEDS_REVIEW",
+            "workflow": "pdf_three_way",
+            "findings": [],
+            "limitations": [],
+            "documents": {},
+            "review_reasons": {},
+            "extraction_errors": {},
+        }
+
+        def make_uploads():
+            return {
+                "purchase_order": (
+                    "po.pdf", io.BytesIO(make_pdf_bytes(po_lines())), "application/pdf"
+                ),
+                "invoice": (
+                    "invoice.pdf", io.BytesIO(make_pdf_bytes(invoice_lines())), "application/pdf"
+                ),
+                "goods_receipt_note": (
+                    "grn.pdf", io.BytesIO(make_pdf_bytes(grn_lines())), "application/pdf"
+                ),
+            }
+
+        with (
+            patch("docweave.api.reconcile_pdf_documents", return_value=report) as workflow,
+            patch(
+                "docweave.api._save_report",
+                side_effect=lambda db, report, workflow, **kwargs: report,
+            ),
+        ):
+            default_response = self.client.post(
+                "/api/v1/reconcile/three-way/pdf", files=make_uploads()
+            )
+            self.assertEqual(default_response.status_code, 200, default_response.text)
+            self.assertIs(workflow.call_args.kwargs["enable_ocr"], False)
+
+            enabled_response = self.client.post(
+                "/api/v1/reconcile/three-way/pdf",
+                params={"enable_ocr": "true"},
+                files=make_uploads(),
+            )
+            self.assertEqual(enabled_response.status_code, 200, enabled_response.text)
+            self.assertIs(workflow.call_args.kwargs["enable_ocr"], True)
+
+
+
+    def test_api_routes_require_bearer_token_but_health_is_public(self):
+        denied = self.client.get(
+            "/api/v1/reconciliations",
+            headers={"Authorization": "Bearer definitely-wrong"},
+        )
+        self.assertEqual(denied.status_code, 401)
+        self.assertEqual(denied.headers.get("www-authenticate"), "Bearer")
+
+        health = self.client.get("/health", headers={"Authorization": ""})
+        self.assertEqual(health.status_code, 200)
+
+    def test_content_length_limit_rejects_oversized_json_early(self):
+        with patch("docweave.api.MAX_JSON_REQUEST_BYTES", 10):
+            response = self.client.post(
+                "/api/v1/reconcile/two-way/json",
+                json={"value": "payload large enough to exceed ten bytes"},
+            )
+        self.assertEqual(response.status_code, 413, response.text)
+
+    def test_pdf_uploads_have_a_combined_size_limit(self):
+        def uploads():
+            return {
+                "purchase_order": ("po.pdf", io.BytesIO(b"%PDF-" + b"a" * 300), "application/pdf"),
+                "invoice": ("invoice.pdf", io.BytesIO(b"%PDF-" + b"b" * 300), "application/pdf"),
+                "goods_receipt_note": ("grn.pdf", io.BytesIO(b"%PDF-" + b"c" * 300), "application/pdf"),
+            }
+
+        with patch("docweave.api.MAX_TOTAL_UPLOAD_BYTES", 700):
+            response = self.client.post(
+                "/api/v1/reconcile/three-way/pdf", files=uploads()
+            )
+        self.assertEqual(response.status_code, 413, response.text)
+        self.assertIn("combined size", response.json()["detail"])
+
+    def test_api_rate_limit_returns_429(self):
+        import docweave.api as api_module
+
+        with api_module._rate_limit_lock:
+            api_module._rate_limit_state.clear()
+        try:
+            with patch("docweave.api.RATE_LIMIT_MAX_REQUESTS", 1):
+                first = self.client.get("/api/v1/reconciliations")
+                second = self.client.get("/api/v1/reconciliations")
+            self.assertEqual(first.status_code, 200, first.text)
+            self.assertEqual(second.status_code, 429, second.text)
+            self.assertTrue(second.headers.get("Retry-After"))
+        finally:
+            with api_module._rate_limit_lock:
+                api_module._rate_limit_state.clear()
+
+    def test_api_readiness_checks_database(self):
+        response = self.client.get("/ready")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json(),
+            {"status": "ready", "service": "docweave-api", "database": "ok"},
+        )
+
+    def test_api_readiness_returns_503_when_database_query_fails(self):
+        with patch.object(
+            Session,
+            "execute",
+            side_effect=SQLAlchemyError("simulated readiness query failure"),
+        ):
+            response = self.client.get("/ready")
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"], "Database readiness check failed.")
 
 
 if __name__ == "__main__":

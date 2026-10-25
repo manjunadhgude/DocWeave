@@ -67,7 +67,39 @@ def reconcile_three_way(purchase_order, invoice, goods_receipt_note):
 
     po = _validate(purchase_order, "purchase_order")
     inv = _validate(invoice, "invoice")
-    findings = report["findings"]
+
+    # In three-way matching, a lower invoice quantity can be legitimate when
+    # it matches the quantity actually received. Likewise, an ordered item
+    # absent from both the invoice and receipt may simply be pending delivery.
+    # Keep the two-way engine strict; apply these exceptions only here, where
+    # receipt evidence is available.
+    findings = []
+    for finding in report["findings"]:
+        code = finding.get("code")
+        field = finding.get("field", "")
+        item = field.removeprefix("lines.").split(".", 1)[0]
+        if code == "ITEM_MISSING_FROM_INVOICE" and item not in receipt["lines"]:
+            continue
+        if code == "TOTAL_MISMATCH":
+            # The PO total describes the full order, while an invoice may cover
+            # only the delivered portion. Suppress this finding only when every
+            # invoiced line is ordered, priced as agreed, and matches receipt
+            # quantities; the invoice validator has already checked its total.
+            invoice_is_receipt_supported = all(
+                invoice_item in po["lines"]
+                and invoice_line["unit_price"]
+                == po["lines"][invoice_item]["unit_price"]
+                and invoice_item in receipt["lines"]
+                and invoice_line["quantity"]
+                == receipt["lines"][invoice_item]["quantity"]
+                and invoice_line["quantity"]
+                <= po["lines"][invoice_item]["quantity"]
+                for invoice_item, invoice_line in inv["lines"].items()
+            )
+            if invoice_is_receipt_supported:
+                continue
+        findings.append(finding)
+    report["findings"] = findings
 
     def add(code, field, expected, actual, explanation, ev_expected, ev_actual):
         findings.append({

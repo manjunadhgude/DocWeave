@@ -134,15 +134,27 @@ def _extract_lines(lines, role, reasons):
 
         cells = [part.strip() for part in text.split("|")]
         if len(cells) != width:
+            # A malformed row after a recognized table header may contain a
+            # real billed/received item. Do not silently omit it and risk a
+            # false match; fail closed and require human review.
+            reasons.append("MALFORMED_LINE_ITEM_ROW")
             continue
         if max(item_col, qty_col, price_col if price_col is not None else 0) >= len(cells):
+            reasons.append("MALFORMED_LINE_ITEM_ROW")
             continue
 
         item_id = cells[item_col]
         quantity = cells[qty_col]
         unit_price = cells[price_col] if price_col is not None else None
 
-        if not item_id or item_id.lower() in item_aliases:
+        if item_id and item_id.lower() in item_aliases:
+            # Repeated table header.
+            continue
+        if not item_id:
+            # Blank separator rows are harmless; rows with other populated
+            # cells but no item identifier are ambiguous and need review.
+            if any(cells):
+                reasons.append("MALFORMED_LINE_ITEM_ROW")
             continue
 
         entry = {
@@ -186,7 +198,7 @@ def _extract_lines(lines, role, reasons):
     return found
 
 
-def extract_pdf_fields(path, role):
+def extract_pdf_fields(path, role, enable_ocr=False):
     """Return extracted fields, evidence and review reasons from a digital PDF.
 
     Supported roles: purchase_order, invoice, goods_receipt_note.
@@ -196,7 +208,7 @@ def extract_pdf_fields(path, role):
     if role not in allowed_roles:
         raise ValueError(f"Unsupported document role: {role}")
 
-    extracted, source = extract_pdf_text(path, role)
+    extracted, source = extract_pdf_text(path, role, enable_ocr=enable_ocr)
     lines = _lines_from_pages(extracted["pages"])
     reasons = []
 

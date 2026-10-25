@@ -29,6 +29,7 @@ def extract_pdf_text(
     role,
     max_bytes=DEFAULT_MAX_BYTES,
     max_pages=DEFAULT_MAX_PAGES,
+    enable_ocr=False,
 ):
     """Extract text page by page and return (result, source_metadata).
 
@@ -126,16 +127,50 @@ def extract_pdf_text(
             context,
         ) from None
 
+    text_was_available = any(page["text"].strip() for page in pages)
+    ocr_used = False
+    if enable_ocr:
+        pages_needing_ocr = [page for page in pages if not page["text"].strip()]
+        if pages_needing_ocr:
+            from docweave.pdf_ocr import (
+                PDFOCREngineUnavailable,
+                extract_ocr_pages,
+            )
+            try:
+                page_numbers = [page["page_number"] for page in pages_needing_ocr]
+                ocr_pages = extract_ocr_pages(
+                    path, max_pages=max_pages, page_numbers=page_numbers
+                )
+                ocr_by_number = {page["page_number"]: page for page in ocr_pages}
+                for page in pages_needing_ocr:
+                    recognized = ocr_by_number.get(page["page_number"])
+                    if recognized is not None:
+                        page["text"] = recognized["text"]
+                        page["character_count"] = len(recognized["text"])
+                ocr_used = True
+            except PDFOCREngineUnavailable as error:
+                raise PDFLoadError(
+                    "PDF_OCR_UNAVAILABLE",
+                    str(error),
+                    {**context, "page_count": page_count},
+                ) from None
+            except Exception as error:
+                raise PDFLoadError(
+                    "PDF_OCR_FAILED",
+                    f"OCR processing failed ({type(error).__name__}).",
+                    {**context, "page_count": page_count},
+                ) from None
+
     total_characters = sum(page["character_count"] for page in pages)
     if not any(page["text"].strip() for page in pages):
         raise PDFLoadError(
             "PDF_NO_EXTRACTABLE_TEXT",
-            "No selectable text was found. The PDF may contain scanned "
-            "images and may need OCR.",
+            "No readable text was extracted. The PDF may be blank or require better OCR.",
             {
                 **context,
                 "page_count": page_count,
                 "character_count": total_characters,
+                "ocr_attempted": ocr_used,
             },
         )
 
@@ -144,6 +179,10 @@ def extract_pdf_text(
         "format": "pdf",
         "byte_size": len(raw),
         "sha256": hashlib.sha256(raw).hexdigest(),
+        "extraction_method": (
+            "hybrid" if ocr_used and text_was_available
+            else "ocr" if ocr_used else "text"
+        ),
     }
 
     result = {
@@ -156,6 +195,10 @@ def extract_pdf_text(
             "Text order and completeness depend on the PDF's internal structure.",
             "Scanned pages without a text layer require OCR.",
             "Extracted text does not prove document authenticity.",
+            *(
+                ["OCR may introduce recognition errors; extracted fields still require validation."]
+                if ocr_used else []
+            ),
         ],
     }
     return result, source

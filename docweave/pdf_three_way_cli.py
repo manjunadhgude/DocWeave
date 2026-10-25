@@ -13,12 +13,18 @@ def main(argv=None):
     parser.add_argument("purchase_order_pdf")
     parser.add_argument("invoice_pdf")
     parser.add_argument("goods_receipt_note_pdf")
+    parser.add_argument(
+        "--ocr",
+        action="store_true",
+        help="Enable optional OCR for scanned PDFs",
+    )
     args = parser.parse_args(argv)
 
     report = reconcile_pdf_documents(
         args.purchase_order_pdf,
         args.invoice_pdf,
         args.goods_receipt_note_pdf,
+        enable_ocr=args.ocr,
     )
     print(json.dumps(report, indent=2, ensure_ascii=False))
 

@@ -6,6 +6,7 @@ os.environ.setdefault(
     "DATABASE_URL",
     "sqlite:///./docweave_test.db",
 )
+os.environ.setdefault("DOCWEAVE_API_TOKEN", "docweave-test-token")
 
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -16,7 +17,9 @@ from docweave.api import app
 
 class StorageErrorTests(unittest.TestCase):
     def test_history_detail_returns_503_on_database_error(self):
-        with TestClient(app) as client:
+        with TestClient(
+            app, headers={"Authorization": f"Bearer {os.environ['DOCWEAVE_API_TOKEN']}"}
+        ) as client:
             with patch.object(
                 Session,
                 "get",

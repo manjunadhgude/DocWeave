@@ -4,9 +4,11 @@ Evidence-grounded business document reconciliation.
 
 ## Current scope
 
-The structured-data prototype compares purchase orders and supplier invoices.
+The structured-data prototype reconciles purchase orders and supplier
+invoices, with an additional three-way workflow that uses goods receipt notes.
 It detects supplier, currency, item, quantity, unit-price, and total
-discrepancies. Invalid inputs are sent to `NEEDS_REVIEW`.
+discrepancies, plus receipt-specific quantity and supplier issues. Invalid or
+ambiguous inputs are sent to `NEEDS_REVIEW`.
 
 Each discrepancy includes expected and actual values and, when a value exists,
 a JSON Pointer identifying its source location. The CLI also reports input
@@ -46,11 +48,14 @@ review outcome, and `2` means an input or command error.
 
 ## Current limitations
 
-PDF support currently covers digital PDFs with explicitly labelled fields and
-recognized pipe-separated tables. Arbitrary supplier layouts, scanned-image
-OCR, visual page coordinates, document authenticity verification, tax,
-discounts, shipping, currency conversion, and rounding policies are not yet
-modeled. The sample documents and evaluation scenarios are synthetic.
+PDF extraction supports digital PDFs with explicitly labelled fields and
+recognized pipe-separated tables. Optional OCR is available when its Python
+dependencies and system Tesseract executable are installed; OCR recognition
+accuracy has not been validated on a representative real-document dataset.
+Arbitrary supplier layouts, visual page coordinates, document authenticity
+verification, tax, discounts, shipping, currency conversion, and rounding
+policies are not yet modeled. The sample documents and evaluation scenarios
+are synthetic.
 
 
 ## Three-way reconciliation
@@ -89,10 +94,12 @@ returns, tolerances and amended orders are not yet modeled.
   compared across different currencies.
 - In three-way matching, an invoice quantity greater than the recorded receipt
   is flagged. A receipt quantity greater than the order is separately flagged.
-- A partial delivery can be legitimate. However, the current policy still flags
-  invoice-versus-order quantity or total differences, even if the invoice matches
-  the quantity received. Such cases need review; partial-invoice approval rules
-  have not yet been implemented.
+- A partial delivery can be legitimate. The three-way workflow suppresses certain
+  invoice-versus-order findings when every invoiced line matches the agreed unit
+  price and recorded receipt quantity, and does not exceed the ordered quantity.
+  Quantity differences may still remain findings; this is not a general partial-
+  invoice approval system. Delivery schedules, returns, tolerances and amended
+  orders are not modeled.
 - A missing item in the receipt is treated as zero recorded quantity for the
   overbilling check. The evidence points to the receipt's `lines` collection to
   show that no matching line was found.
@@ -166,9 +173,10 @@ When review is required, the normalized `document` is withheld so incomplete
 data is not accidentally sent to reconciliation.
 
 This is a controlled-layout, rule-based first step, not general PDF
-understanding. It does not yet locate visual page coordinates, handle arbitrary
-supplier templates, perform OCR, or feed PDF results automatically into the
-reconciliation CLI. A successful extraction is not proof of authenticity.
+understanding. It does not yet locate visual page coordinates or handle
+arbitrary supplier templates. Optional OCR is available for scanned PDFs when
+configured, but recognition accuracy has not been validated on representative
+real supplier documents. A successful extraction is not proof of authenticity.
 
 ## End-to-end PDF three-way reconciliation
 
@@ -192,10 +200,11 @@ page number and extracted text snippet when that source location is available.
 Exit code `0` means `MATCH`, `1` means a detected discrepancy, and `2` means
 the workflow requires review.
 
-This workflow inherits the conservative, labelled-field and pipe-table format
-supported by the current extractor. It does not support arbitrary supplier
-layouts or scanned-image OCR, and successful matching does not prove document
-authenticity or physical delivery.
+This workflow inherits the conservative, labelled-field and pipe-table
+format supported by the current extractor. Optional OCR can be enabled with
+`--ocr` when the required Python packages and system Tesseract executable are
+installed. Arbitrary supplier layouts are not supported, and successful
+matching does not prove document authenticity or physical delivery.
 
 ## FastAPI backend
 
@@ -203,6 +212,8 @@ Install dependencies with `python -m pip install -r requirements.txt`, then
 start the local API server:
 
 ```bash
+# Set a strong token before starting the API (or load it from your ignored .env file).
+export DOCWEAVE_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 python -m uvicorn docweave.api:app --host 127.0.0.1 --port 8000
 ```
 
@@ -211,6 +222,7 @@ Open `http://127.0.0.1:8000/docs` to explore the interactive API documentation.
 Endpoints:
 
 - `GET /health` — basic service health.
+- `GET /ready` — checks database connectivity using `SELECT 1`; returns HTTP 503 if unavailable.
 - `POST /api/v1/reconcile/two-way/json` — purchase order and invoice JSON.
 - `POST /api/v1/reconcile/three-way/json` — purchase order, invoice and GRN JSON.
 - `POST /api/v1/reconcile/three-way/pdf` — three digital PDF files.
@@ -219,10 +231,17 @@ Business results such as `MATCH`, `DISCREPANCY` and `NEEDS_REVIEW` are returned
 as reconciliation reports. Invalid request shapes are rejected by the API.
 The PDF endpoint applies a 25 MiB per-file limit and requires `.pdf` filenames.
 
-This is an initial local-development API, not a production deployment.
-Authentication, rate limiting, persistent job storage, deployment hardening,
-and a total request-body limit at the HTTP ingress layer are not yet implemented.
-Do not expose this service publicly without appropriate security controls.
+This remains a development API rather than a production deployment. Every `/api/`
+route requires a Bearer token configured with `DOCWEAVE_API_TOKEN`; `/health`
+remains public for process-health checks. The API applies an in-process rate limit
+per client address and worker process. Requests with a declared `Content-Length`
+are rejected early above 1 MiB for ordinary API routes or 52 MiB for the PDF route.
+Each PDF is limited to 25 MiB and the combined three-PDF payload is limited to
+50 MiB during saving. Configure matching request-body limits and distributed rate
+limiting at the reverse proxy or ingress as well: in-process limits are not shared
+between workers, and Content-Length checks alone do not replace ingress controls.
+TLS, production secret management, monitoring, and live PostgreSQL validation are
+still required before public deployment.
 
 ## Persistent reconciliation history
 
@@ -300,9 +319,10 @@ returns the saved report. A database write failure returns an error rather
 than claiming the result was saved.
 
 The default SQLite database is intended for local development. Automated API
-tests use a separate SQLite test database. PostgreSQL compatibility is
-implemented, but a real PostgreSQL integration run is still required before
-claiming that deployment has been validated against a live PostgreSQL server.
+tests use a separate SQLite test database. PostgreSQL support and migration
+verification are implemented. Before claiming live PostgreSQL deployment
+validation, confirm that the documented PostgreSQL integration checks have
+passed against the current code and database configuration.
 
 
 ## Idempotent API retries
@@ -322,3 +342,50 @@ database table. The database uniqueness constraint and transaction protect
 against concurrent duplicate submissions. Requests without the header retain
 the previous behavior. This feature does not replace authentication, rate
 limiting, request-size controls at the HTTP ingress, or production migrations.
+
+
+## Optional OCR for scanned PDFs
+
+OCR is opt-in. Digital PDFs continue to use selectable-text extraction by default.
+For scanned PDFs, install the optional Python packages and a system Tesseract
+OCR executable on the machine running DocWeave:
+
+```bash
+python -m pip install pypdfium2 pytesseract
+tesseract --version
+```
+
+The `tesseract` command must be available on `PATH`; installing the Python
+package alone does not install the OCR engine. OCR can be requested explicitly
+for single-document extraction:
+
+```bash
+python -m docweave.pdf_cli path/to/scanned_invoice.pdf --role invoice --ocr
+python -m docweave.pdf_fields_cli path/to/scanned_invoice.pdf --role invoice --ocr
+```
+
+For three-way PDF reconciliation, use the `--ocr` flag:
+
+```bash
+python -m docweave.pdf_three_way_cli \
+  path/to/purchase_order.pdf path/to/invoice.pdf path/to/goods_receipt_note.pdf --ocr
+```
+
+The PDF API also accepts `?enable_ocr=true` on
+`POST /api/v1/reconcile/three-way/pdf`; the default is `false`. OCR is attempted
+only on pages without selectable text, while existing selectable text is preserved.
+The extraction metadata reports `text`, `ocr`, or `hybrid` as applicable. OCR is
+subject to the configured file and page limits and can introduce recognition errors. All extracted values
+still pass through DocWeave's conservative field validation; incomplete or
+ambiguous extraction remains `NEEDS_REVIEW`. Mocked tests verify the integration
+path, but real scanned-document accuracy must be measured on representative,
+reviewed samples before relying on OCR results.
+
+
+### Liveness and readiness
+
+`GET /health` is a public liveness endpoint: it confirms the API process responds,
+but it does not check the database. `GET /ready` is a public readiness endpoint
+that executes `SELECT 1` against the configured database and returns HTTP 503 if
+the check fails. A readiness probe does not replace real PostgreSQL migration,
+backup/restore, or production network-security validation.

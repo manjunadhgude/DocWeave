@@ -123,6 +123,34 @@ class PDFFieldExtractionTests(unittest.TestCase):
             report["review_reasons"],
         )
 
+    def test_malformed_table_rows_require_review_instead_of_being_skipped(self):
+        common = [
+            "Invoice No: INV-1",
+            "Supplier ID: SUP-1",
+            "Currency: INR",
+            "Total: 20.00",
+            "Item ID | Description | Quantity | Unit Price",
+            "A | Valid item | 1 | 10.00",
+        ]
+        malformed_rows = [
+            ("short-row", "B | Truncated item | 1"),
+            ("missing-item-id", " | Item without identifier | 1 | 10.00"),
+        ]
+
+        for name, malformed_row in malformed_rows:
+            with self.subTest(name=name):
+                path = self.write_pdf(
+                    f"{name}.pdf",
+                    common + [malformed_row, "C | Another valid item | 1 | 10.00"],
+                )
+                report = extract_pdf_fields(path, "invoice")
+                self.assertEqual(report["status"], "NEEDS_REVIEW")
+                self.assertIsNone(report["document"])
+                self.assertIn(
+                    "MALFORMED_LINE_ITEM_ROW",
+                    report["review_reasons"],
+                )
+
     def test_invalid_quantity_requires_review(self):
         path = self.write_pdf("bad-qty.pdf", [
             "Invoice No: INV-1",
