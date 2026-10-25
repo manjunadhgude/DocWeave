@@ -39,9 +39,12 @@ def check_three_way(name, mutate, expected_status, expected_codes=()):
     po, invoice, grn = documents()
     mutate(po, invoice, grn)
     report = reconcile_three_way(po, invoice, grn)
-    codes = {f["code"] for f in report.get("findings", [])}
-    passed = report.get("status") == expected_status
-    passed = passed and all(code in codes for code in expected_codes)
+    codes = sorted(f["code"] for f in report.get("findings", []))
+    expected = sorted(expected_codes)
+    passed = (
+        report.get("status") == expected_status
+        and codes == expected
+    )
     return {
         "scenario": name,
         "passed": passed,
@@ -115,16 +118,18 @@ cases = [
     ("unexpected_receipt_item", unexpected_receipt_item, "DISCREPANCY",
      ("RECEIVED_ITEM_NOT_ORDERED",)),
     ("invoice_item_replaced", invoice_item_replaced, "DISCREPANCY",
-     ("ITEM_MISSING_FROM_INVOICE", "UNEXPECTED_INVOICE_ITEM")),
+     ("INVOICE_EXCEEDS_RECEIVED_QUANTITY",
+      "ITEM_MISSING_FROM_INVOICE", "UNEXPECTED_INVOICE_ITEM")),
     ("quantity_mismatch", quantity_mismatch, "DISCREPANCY",
      ("QUANTITY_MISMATCH",)),
     ("missing_receipt_item", missing_receipt_item, "DISCREPANCY",
-     ("INVOICE_EXCEEDS_RECEIVED_QUANTITY",)),
+     ("INVOICE_EXCEEDS_RECEIVED_QUANTITY",
+      "RECEIVED_ITEM_NOT_ORDERED")),
     ("invalid_receipt_quantity", invalid_receipt, "NEEDS_REVIEW", ()),
     ("invalid_invoice_total", invalid_invoice_total, "NEEDS_REVIEW", ()),
     ("both_over_order", receipt_and_invoice_over_order, "DISCREPANCY",
-     ("INVOICE_EXCEEDS_RECEIVED_QUANTITY",
-      "RECEIPT_EXCEEDS_ORDERED_QUANTITY")),
+     ("INVOICE_EXCEEDS_RECEIVED_QUANTITY", "QUANTITY_MISMATCH",
+      "RECEIPT_EXCEEDS_ORDERED_QUANTITY", "TOTAL_MISMATCH")),
 ]
 
 results = [

@@ -140,5 +140,25 @@ class PDFThreeWayTests(unittest.TestCase):
         self.assertEqual(report["status"], "NEEDS_REVIEW")
 
 
+    def test_cli_passes_ocr_flag_to_workflow(self):
+        from unittest.mock import patch
+
+        report = {"status": "NEEDS_REVIEW", "workflow": "pdf_three_way"}
+        output = io.StringIO()
+        with (
+            patch(
+                "docweave.pdf_three_way_cli.reconcile_pdf_documents",
+                return_value=report,
+            ) as workflow,
+            contextlib.redirect_stdout(output),
+        ):
+            code = main([
+                str(self.po), str(self.invoice), str(self.grn), "--ocr"
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertTrue(workflow.call_args.kwargs["enable_ocr"])
+
+
 if __name__ == "__main__":
     unittest.main()

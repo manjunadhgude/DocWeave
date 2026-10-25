@@ -33,6 +33,30 @@ class ThreeWayTests(unittest.TestCase):
         r = reconcile_three_way(*documents(received=3))
         self.assertIn("INVOICE_EXCEEDS_RECEIVED_QUANTITY", self.codes(r))
 
+    def test_valid_partial_delivery_and_invoice_matches_received_quantity(self):
+        po, inv, grn = documents(billed=3, received=3)
+        r = reconcile_three_way(po, inv, grn)
+        self.assertEqual(r["status"], "DISCREPANCY")
+        self.assertIn("QUANTITY_MISMATCH", self.codes(r))
+
+    def test_unreceived_order_item_can_be_absent_from_invoice(self):
+        po, inv, grn = documents(billed=5, received=5)
+        po["lines"].append({"item_id": "B", "quantity": 2, "unit_price": 10})
+        po["total"] += 20
+        grn["lines"] = [{"item_id": "A", "quantity": 5}]
+        r = reconcile_three_way(po, inv, grn)
+        self.assertEqual(r["status"], "MATCH")
+        self.assertNotIn("ITEM_MISSING_FROM_INVOICE", self.codes(r))
+
+    def test_received_item_missing_from_invoice_remains_discrepancy(self):
+        po, inv, grn = documents()
+        po["lines"].append({"item_id": "B", "quantity": 2, "unit_price": 10})
+        po["total"] += 20
+        grn["lines"].append({"item_id": "B", "quantity": 2})
+        r = reconcile_three_way(po, inv, grn)
+        self.assertEqual(r["status"], "DISCREPANCY")
+        self.assertIn("ITEM_MISSING_FROM_INVOICE", self.codes(r))
+
     def test_receipt_exceeds_order(self):
         r = reconcile_three_way(*documents(received=6))
         self.assertIn("RECEIPT_EXCEEDS_ORDERED_QUANTITY", self.codes(r))
