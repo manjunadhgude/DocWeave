@@ -1,0 +1,3 @@
+# Optional only; BM25 and baseline tests do not require these packages.
+numpy>=2.1,<3
+sentence-transformers>=5,<6

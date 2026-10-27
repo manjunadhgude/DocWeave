@@ -389,3 +389,42 @@ but it does not check the database. `GET /ready` is a public readiness endpoint
 that executes `SELECT 1` against the configured database and returns HTTP 503 if
 the check fails. A readiness probe does not replace real PostgreSQL migration,
 backup/restore, or production network-security validation.
+
+## Optional retrieval-augmented generation (RAG)
+
+DocWeave includes an isolated RAG subsystem under `docweave/rag/`, separate from structured reconciliation.
+
+The offline baseline supports `.txt`, `.md` and `.json`; PDF ingestion reuses page-aware extraction. Run:
+
+```bash
+python -m unittest discover -s tests -p 'test_rag_*.py' -v
+python tools/evaluate_rag.py
+```
+
+The synthetic evaluation reports Recall@3 and MRR for BM25 and lexical reranking. It is not a real-world accuracy claim. The deterministic test provider is not a general LLM.
+
+Optional semantic retrieval dependencies can be installed explicitly with `python -m pip install -r requirements-rag-optional.txt`. The first use of `SentenceTransformerEmbedder` may download `sentence-transformers/all-MiniLM-L6-v2`. A local Ollama provider is available if Ollama and a model are already installed. The vector index is in-memory and intended for small corpora, not large-scale serving. Lexical reranking is not a neural cross-encoder. Citations preserve document/chunk/page provenance but do not prove that every generated claim is entailed by the cited passage. The initial RAG subsystem is not yet exposed as a public API endpoint or persistent vector database.
+
+
+## RAG retrieval modes and limitations
+
+The RAG retrieval module supports `keyword`, `keyword_expanded`,
+`semantic`, `hybrid`, and `hybrid_expanded` modes. Expanded modes add a
+small, explicit business-document synonym list; they do not provide general
+semantic understanding. Semantic and hybrid modes require an embedding
+provider. The current vector store is an in-memory prototype.
+
+Run the retrieval benchmark with:
+
+```bash
+python tools/evaluate_rag_expanded.py
+```
+
+The benchmark uses a small synthetic dataset. Its scores are not estimates of
+production accuracy. Returning retrieval results for an unanswerable question
+is not the same as generating an unsupported answer.
+
+Answer citations record source metadata and excerpts for selected evidence.
+They are provenance aids, not an independent proof that every generated claim
+is entailed by the cited text. Validate generated answers on a representative
+annotated dataset before relying on them for business decisions.
