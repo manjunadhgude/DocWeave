@@ -26,6 +26,20 @@ def _has_lexical_support(answer_text, evidence_chunks):
     return bool(answer_tokens and answer_tokens.intersection(evidence_tokens))
 
 
+
+
+def _has_numeric_support(answer_text, evidence_chunks):
+    """Reject numeric claims whose literal values are absent from evidence.
+
+    This conservative check is not a semantic entailment verifier.
+    It may reject legitimate derived values that are not stated explicitly.
+    """
+    number_pattern = r"(?<![A-Za-z])\d+(?:[.,]\d+)*(?![A-Za-z])"
+    answer_numbers = set(re.findall(number_pattern, answer_text))
+    evidence_text = " ".join(chunk.text for chunk in evidence_chunks)
+    evidence_numbers = set(re.findall(number_pattern, evidence_text))
+    return answer_numbers.issubset(evidence_numbers)
+
 def answer_question(question, retrieved, provider, *, min_score=0.0, max_evidence=5):
     if max_evidence < 1:
         raise ValueError("max_evidence must be >= 1")
@@ -38,7 +52,7 @@ def answer_question(question, retrieved, provider, *, min_score=0.0, max_evidenc
     raw = raw.strip()
     if not raw or raw == "INSUFFICIENT_EVIDENCE":
         return Answer(_ABSTENTION, True)
-    if not _has_lexical_support(raw, usable):
+    if not _has_lexical_support(raw, usable) or not _has_numeric_support(raw, usable):
         return Answer(_ABSTENTION, True)
     citations = tuple(
         Citation(chunk.document_id, chunk.source_name, chunk.chunk_id,
